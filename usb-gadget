@@ -1,0 +1,151 @@
+#!/bin/bash
+# Set up USB gadget devices
+# Unless configured otherwise through /etc/sysconfig/usb-gadget,
+# this will set up a multi-function network gadget (with all
+# common network interface types) with static IPs 10.20.3x.1
+# (where x = 0 for the first interface, 1 for the second, ...)
+# and a serial port gadget that will have a getty running.
+#
+# (C) 2020 Bernhard Rosenkränzer <bero@lindev.ch>
+# Released under the GPLv3+
+
+if [ "$1" = "off" ]; then
+	cd /sys/kernel/config/usb_gadget/g1
+	echo '' >UDC
+	for i in configs/*/strings/*; do
+		[ -d "$i" ] && rmdir "$i"
+	done
+	for i in configs/*.*/*.*; do
+		[ -e "$i" ] && rm "$i"
+	done
+	for i in configs/*; do
+		[ -d "$i" ] && rmdir "$i"
+	done
+	for i in strings/*; do
+		[ -d "$i" ] && rmdir "$i"
+	done
+	cd ..
+	rmdir g1
+	exit 0
+fi
+
+[ -e /etc/sysconfig/usb-gadget ] && . /etc/sysconfig/usb-gadget
+
+/sbin/modprobe libcomposite
+
+# Unless configured otherwise, we'll take the first gadget port we find
+[ -z "$USB_INTERFACE" ] && USB_INTERFACE="$(ls -1 --indicator-style=none /sys/class/udc 2>/dev/null |head -n1)"
+if [ -z "$USB_INTERFACE" ]; then
+	echo "Gadget interface not found" >&2
+	exit 1
+fi
+if ! [ -d /sys/class/udc/$USB_INTERFACE ]; then
+	echo "Invalid gadget interface $USB_INTERFACE" >&2
+	exit 1
+fi
+
+# Unless specified otherwise, we'll claim to be a Linux Multifunction Composite Gadget
+[ -z "$USB_VENDOR" ] && USB_VENDOR=0x1D6B
+[ -z "$USB_DEVICE" ] && USB_DEVICE=0x0104
+# And a similarly generic name
+[ -z "$USB_SERIALNUMBER" ] && USB_SERIALNUMBER=0
+[ -z "$USB_MANUFACTURER" ] && USB_MANUFACTURER="OpenMandriva Association"
+[ -z "$USB_PRODUCT" ] && USB_PRODUCT="Generic USB Device"
+# Exposed functions -- for supported functions, look in
+# /lib/modules/$(uname -r)/kernel/drivers/usb/gadget/function
+# and see https://www.kernel.org/doc/html/latest/usb/gadget-testing.html
+# acm = serial port
+# ecm = ethernet (Ethernet Control Model)
+# eem = ethernet (Ethernet Emulation Model)
+# ffs (AKA fs) = FunctionFS
+# geth (AKA ecm_subset) = ethernet (subset of Ethernet Control Model)
+# hid = Human Interface Device
+# loopback (AKA ss_lb)
+# mass_storage = storage
+# midi = MIDI device
+# ncm = ethernet (Network Control Model)
+# obex (binary object exchange)
+# printer
+# rndis = ethernet (Microsoft protocol)
+# gser (AKA serial)
+# uac1 (USB Audio Class) = Audio
+# uac2 (USB Audio Class) = Audio
+# uvc (USB Video Class) = Video
+USB_FUNCTIONS="ecm eem geth ncm rndis acm"
+
+mkdir /sys/kernel/config/usb_gadget/g1
+cd /sys/kernel/config/usb_gadget/g1
+echo $USB_VENDOR >idVendor
+echo $USB_DEVICE >idProduct
+mkdir strings/0x409
+echo $USB_SERIALNUMBER >strings/0x409/serialnumber
+echo $USB_MANUFACTURER >strings/0x409/manufacturer
+echo $USB_PRODUCT >strings/0x409/product
+
+CONF=1
+while [ -e configs/c.$CONF ]; do
+	CONF=$((CONF+1))
+done
+for i in $USB_FUNCTIONS; do
+	N=0
+	while [ -e functions/$i.$N ]; do
+		N=$((N+1))
+	done
+	mkdir functions/$i.$N
+	for fn in functions/$i.$N/*; do
+		param="$(basename $fn)"
+		value="$(eval echo \${${i}_$param})"
+		if [ -n "$value" ]; then
+			echo $value >$fn
+		fi
+	done
+	mkdir configs/c.$CONF
+	ln -s functions/$i.$N configs/c.$CONF
+	mkdir configs/c.$CONF/strings/0x409
+	SN="$(eval echo \${${i}_SERIALNUMBER})"
+	[ -z "$SN" ] && SN=$USB_SERIALNUMBER
+	MF="$(eval echo \${${i}_MANUFACTURER})"
+	[ -z "$MF" ] && MF=$USB_MANUFACTURER
+	PR="$(eval echo \${${i}_PRODUCT})"
+	[ -z "$PR" ] && PR=$USB_PRODUCT
+	echo $SN >configs/c.$CONF/strings/0x409/serialnumber
+	echo $MF >configs/c.$CONF/strings/0x409/manufacturer
+	echo $PR >configs/c.$CONF/strings/0x409/product
+	CONF=$((CONF+1))
+done
+echo $USB_INTERFACE >UDC
+udevadm settle -t 5
+
+# Bring up network interfaces
+for i in functions/*/ifname; do
+	interface="$(cat $i)"
+	gadgettype="$(echo $i |cut -d/ -f2 |cut -d. -f1)"
+	if [ "$interface" = "(unnamed net_device)" ]; then
+		echo "$gadgettype didn't get a network interface" >&2
+		continue
+	fi
+	NM="$(eval echo \${${gadgettype}_NM})"
+	if [ "$NM" = "yes" -o "$NM" = "on" -o "$NM" = "true" -o "$NM" = "1" ]; then
+		# NetworkManager will handle the device, no need for us to do anything
+		continue
+	fi
+	/sbin/ip link set $interface up
+	nmcli device set $interface managed no
+	IP="$(eval echo \${${gadgettype}_IP})"
+	if [ -z "$IP" ]; then
+		# No IP given, so let's assign one that's easy to memorize
+		[ -z "$AUTOIP" ] && AUTOIP=30
+		IP="10.20.$AUTOIP.1"
+		AUTOIP=$((AUTOIP+1))
+	fi
+	if ! echo $IP |grep -q /; then
+		IP="$IP/24"
+	fi
+	/sbin/ip addr add $IP dev $interface
+done
+
+# And spawn a getty on serial interfaces
+# FIXME is there a way to determine the interface -> /dev/tty* mapping?
+for i in /dev/ttyG*; do
+	[ -e "$i" ] && systemctl start "getty@$(basename $i)"
+done

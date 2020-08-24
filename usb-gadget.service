@@ -1,0 +1,12 @@
+[Unit]
+Description=Set up USB gadget ports
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/usb-gadget
+ExecStop=/usr/sbin/usb-gadget off
+
+[Install]
+WantedBy=multi-user.target
