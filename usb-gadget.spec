@@ -5,6 +5,7 @@ Release:	1
 Source0:	usb-gadget
 Source1:	usb-gadget.service
 License:	GPLv3
+BuildArch:	noarch
 
 %description
 Tool to automatically configure USB gadget ports
