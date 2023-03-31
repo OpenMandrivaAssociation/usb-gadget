@@ -1,7 +1,7 @@
 Name:		usb-gadget
 Summary:	Tool to automatically configure USB gadget ports
 Version:	1.0
-Release:	2
+Release:	3
 Source0:	usb-gadget
 Source1:	usb-gadget.service
 License:	GPLv3
